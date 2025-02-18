@@ -4,3 +4,11 @@ requests
 pydantic
 beautifulsoup4
 google-genai
+transformers
+tweepy
+python-dotenv
+aiohttp
+Brotli
+snscrape
+openai
+nltk
