@@ -11,4 +11,5 @@ aiohttp
 Brotli
 snscrape
 openai
-nltk
+aiomysql
+asyncio
