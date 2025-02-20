@@ -1,0 +1,26 @@
+2025-02-20 12:36:26,669 [INFO] Started server process [850934]
+2025-02-20 12:36:26,671 [INFO] Waiting for application startup.
+2025-02-20 12:36:26,701 [INFO] Database initialized successfully
+2025-02-20 12:36:26,702 [INFO] Application startup complete.
+2025-02-20 12:36:26,721 [INFO] Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2025-02-20 12:36:32,764 [INFO] HTTP Request: GET https://nation.africa/kenya/search?q=Irungu+Kang%27ata "HTTP/1.1 403 Forbidden"
+2025-02-20 12:36:32,966 [INFO] HTTP Request: GET https://www.citizen.digital/search/?q=Irungu+Kang%27ata "HTTP/1.1 200 OK"
+2025-02-20 12:36:33,232 [INFO] HTTP Request: GET https://www.standardmedia.co.ke/search?query=Irungu+Kang%27ata "HTTP/1.1 200 OK"
+2025-02-20 12:36:33,461 [WARNING] No articles found during scraping
+2025-02-20 12:39:40,315 [INFO] Shutting down
+2025-02-20 12:39:40,422 [INFO] Waiting for application shutdown.
+2025-02-20 12:39:40,424 [INFO] Application shutdown complete.
+2025-02-20 12:39:40,429 [INFO] Finished server process [850934]
+2025-02-20 12:39:44,385 [INFO] Started server process [852152]
+2025-02-20 12:39:44,386 [INFO] Waiting for application startup.
+2025-02-20 12:39:44,388 [INFO] Database initialized successfully
+2025-02-20 12:39:44,392 [INFO] Application startup complete.
+2025-02-20 12:39:44,400 [INFO] Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+2025-02-20 12:39:48,741 [INFO] HTTP Request: GET https://nation.africa/kenya/search?q=Irungu+Kang%27ata "HTTP/1.1 403 Forbidden"
+2025-02-20 12:39:49,184 [INFO] HTTP Request: GET https://www.standardmedia.co.ke/search?query=Irungu+Kang%27ata "HTTP/1.1 200 OK"
+2025-02-20 12:39:49,344 [INFO] HTTP Request: GET https://www.citizen.digital/search/?q=Irungu+Kang%27ata "HTTP/1.1 200 OK"
+2025-02-20 12:39:49,387 [WARNING] No articles found during scraping
+2025-02-20 12:49:10,255 [INFO] Shutting down
+2025-02-20 12:49:10,361 [INFO] Waiting for application shutdown.
+2025-02-20 12:49:10,364 [INFO] Application shutdown complete.
+2025-02-20 12:49:10,367 [INFO] Finished server process [852152]
