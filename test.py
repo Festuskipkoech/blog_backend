@@ -1,9 +1,9 @@
-from fastapi import FastAPI, BackgroundTasks, Query
+from fastapi import FastAPI, BackgroundTasks
 import uvicorn
 import time
 import random
+from typing import List, Dict
 import re
-from typing import List, Dict, Optional
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -11,91 +11,10 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-import mysql.connector  # New import for MySQL
 
-app = FastAPI(title="Irungu Kang'ata News Scraper with Selenium and MySQL")
+app = FastAPI(title="Irungu Kang'ata News Scraper with Selenium")
 
-# ------------------------
-# MySQL Database Settings
-# ------------------------
-db_config = {
-    "host": "localhost",
-    "user": "root",      
-    "password": "",  
-    "database": "news_scraper"      
-}
-
-def init_db():
-    """Initializes the database and creates the articles table if it doesn't exist."""
-    try:
-        # First, create the database if it doesn't exist
-        conn = mysql.connector.connect(
-            host=db_config["host"],
-            user=db_config["user"],
-            password=db_config["password"]
-        )
-        cursor = conn.cursor()
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_config['database']}")
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        # Now connect to the created database and create the table
-        conn = mysql.connector.connect(**db_config)
-        cursor = conn.cursor()# In init_db() function, modify the CREATE TABLE statement
-        cursor.execute("""
-        CREATE TABLE IF NOT EXISTS articles (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            title VARCHAR(255),
-            date VARCHAR(255),
-            content TEXT,
-            author VARCHAR(255),
-            link VARCHAR(511) UNIQUE,  -- Add UNIQUE constraint
-            source VARCHAR(255)
-        )
-        """)
-        conn.commit()
-        cursor.close()
-        conn.close()
-        print("Database and table initialized successfully.")
-    except Exception as e:
-        print("Error initializing database:", e)
-
-# Initialize the database at startup
-init_db()
-
-def save_to_db(articles: List[Dict]):
-    """Save scraped articles to MySQL database, ignoring duplicates."""
-    try:
-        conn = mysql.connector.connect(**db_config)
-        cursor = conn.cursor()
-        for article in articles:
-            query = """
-            INSERT IGNORE INTO articles (title, date, content, author, link, source)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """
-            values = (
-                article.get("title"),
-                article.get("date"),
-                article.get("content"),
-                article.get("author"),
-                article.get("link"),
-                article.get("source")
-            )
-            cursor.execute(query, values)
-        conn.commit()
-        print(f"Inserted {cursor.rowcount} new articles into the database.")
-    except Exception as e:
-        print("Error saving to database:", e)
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
-
-# ------------------------
-# Scraper configuration
-# ------------------------
+# Updated news sources with new selectors
 sources = [
     {
         "name": "Kenyan News",
@@ -139,8 +58,9 @@ sources = [
     }
 ]
 
+
 def get_webdriver():
-    """Set up and return a headless Chrome webdriver."""
+    """Set up and return a headless Chrome webdriver"""
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
@@ -165,17 +85,17 @@ def get_webdriver():
         return webdriver.Chrome(options=chrome_options)
 
 def clean_text(text):
-    """Clean up text by removing extra whitespace."""
+    """Clean up text by removing extra whitespace"""
     if not text:
         return ""
     return re.sub(r'\s+', ' ', text).strip()
 
 def scrape_news_with_selenium(source: Dict) -> List[Dict]:
-    """Scrape news articles from the given source using Selenium."""
+    """Scrape news articles from the given source using Selenium"""
     print(f"\n\033[1mScraping from {source['name']}...\033[0m")
     results = []
     driver = None
-    
+        
     try:
         driver = get_webdriver()
         print(f"Loading {source['url']}...")
@@ -193,7 +113,7 @@ def scrape_news_with_selenium(source: Dict) -> List[Dict]:
         
         for idx, article in enumerate(articles[:5]):
             try:
-                # Extract title and link
+                # Extract title
                 try:
                     title_element = article.find_element(By.CSS_SELECTOR, source['title_selector'])
                     title = clean_text(title_element.text)
@@ -227,12 +147,12 @@ def scrape_news_with_selenium(source: Dict) -> List[Dict]:
                 if (title == f"[Article {idx+1}]" or not title) and not link and content == "Content not available":
                     continue
                 
-                # Check relevance (example terms)
+                # Check relevance
                 article_text = (title + " " + content).lower()
                 if not any(term in article_text for term in ['kang', 'murang', 'governor']):
                     continue
                 
-                # Print article info
+                # Format and print results
                 print(f"\033[1;32m{title}\033[0m")
                 print(f"\033[0;36m{date} | By: {author}\033[0m")
                 print(f"{content[:150]}..." if len(content) > 150 else content)
@@ -264,7 +184,7 @@ def scrape_news_with_selenium(source: Dict) -> List[Dict]:
     return results
 
 def run_all_scrapers_selenium():
-    """Run all scrapers using Selenium and return combined results."""
+    """Run all scrapers using Selenium and return combined results"""
     all_results = []
     
     for source in sources:
@@ -278,9 +198,7 @@ def run_all_scrapers_selenium():
     
     return all_results
 
-# ------------------------
 # FastAPI Endpoints
-# ------------------------
 
 @app.get("/")
 def read_root():
@@ -289,20 +207,18 @@ def read_root():
         "message": "Welcome to Irungu Kang'ata News Scraper",
         "endpoints": {
             "GET /": "This welcome message",
-            "GET /scrape": "Scrape all news sources and save to MySQL",
+            "GET /scrape": "Scrape all news sources",
             "GET /sources": "List all available news sources",
             "GET /scrape/{source_index}": "Scrape a specific source",
             "GET /health": "Check API health status"
         }
     }
 
-@app.get("/scrape")
-async def scrape_endpoint(background_tasks: BackgroundTasks):
-    """Endpoint to scrape all sources and save the results to MySQL."""
+@app.get("/api/scrape")
+async def scrape_endpoint():
+    """Endpoint to scrape all sources"""
     try:
         results = run_all_scrapers_selenium()
-        # Save the scraped results in the background so the API responds immediately
-        background_tasks.add_task(save_to_db, results)
         return {
             "status": "success",
             "articles_found": len(results),
@@ -313,58 +229,7 @@ async def scrape_endpoint(background_tasks: BackgroundTasks):
             "status": "error",
             "message": str(e)
         }
-# Add this function to your existing FastAPI app
-@app.get("/api/content")
-async def get_content(
-    page: int = Query(1, ge=1),
-    per_page: int = Query(6, ge=1, le=100)
-):
-    """Get paginated content from the database."""
-    try:
-        conn = mysql.connector.connect(**db_config)
-        cursor = conn.cursor(dictionary=True)
-        
-        # Get total count
-        cursor.execute("SELECT COUNT(*) as total FROM articles")
-        total_result = cursor.fetchone()
-        total = total_result['total'] if total_result else 0
-        
-        # Calculate offset
-        offset = (page - 1) * per_page
-        
-        # Get paginated articles
-        query = """
-            SELECT 
-                id,
-                title,
-                date,
-                content,
-                author,
-                link as url,
-                source
-            FROM articles
-            ORDER BY date DESC
-            LIMIT %s OFFSET %s
-        """
-        cursor.execute(query, (per_page, offset))
-        articles = cursor.fetchall()
-        
-        return {
-            "articles": articles,
-            "total": total
-        }
-    except Exception as e:
-        return {
-            "status": "error",
-            "message": str(e),
-            "articles": [],
-            "total": 0
-        }
-    finally:
-        if cursor:
-            cursor.close()
-        if conn:
-            conn.close()
+
 @app.get("/sources")
 def list_sources():
     """List all configured news sources"""
@@ -379,25 +244,143 @@ def list_sources():
             } for i, source in enumerate(sources)
         ]
     }
+from fastapi import FastAPI, BackgroundTasks, Query
+import uvicorn
+import time
+import random
+from typing import List, Dict, Optional
+import re
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from webdriver_manager.chrome import ChromeDriverManager
 
-@app.get("/scrape/{source_index}")
-async def scrape_specific_source(source_index: int, background_tasks: BackgroundTasks):
-    """Scrape a specific source by index and save results to MySQL."""
+# Define a global variable to store the last scraped results
+# This will serve as a simple in-memory cache
+last_scraped_results = []
+last_scrape_time = None
+
+# Add these functions after your existing scraping functions
+
+def get_cached_results():
+    """Return the cached results and the time since last scrape"""
+    global last_scraped_results, last_scrape_time
+    
+    current_time = time.time()
+    time_since_scrape = None
+    
+    if last_scrape_time:
+        time_since_scrape = current_time - last_scrape_time
+    
+    return {
+        "results": last_scraped_results,
+        "time_since_scrape": time_since_scrape
+    }
+
+def update_cache_with_results(results):
+    """Update the in-memory cache with new results"""
+    global last_scraped_results, last_scrape_time
+    
+    last_scraped_results = results
+    last_scrape_time = time.time()
+
+# Add this endpoint to your existing FastAPI application
+
+@app.get("/api/content")
+async def get_content(
+    page: int = Query(1, ge=1, description="Page number"),
+    per_page: int = Query(10, ge=1, le=50, description="Items per page")
+):
+    """
+    Get articles with pagination support from the cached results.
+    If cache is empty or older than 30 minutes, it triggers a new scrape.
+    """
+    global last_scraped_results, last_scrape_time
+    
+    # Check if we need to scrape (empty cache or older than 30 minutes)
+    cache_data = get_cached_results()
+    need_scrape = (
+        not cache_data["results"] or 
+        not cache_data["time_since_scrape"] or 
+        cache_data["time_since_scrape"] > 1800  # 30 minutes
+    )
+    
+    if need_scrape:
+        try:
+            # Run scraper to get fresh data
+            results = run_all_scrapers_selenium()
+            update_cache_with_results(results)
+        except Exception as e:
+            # If scraping fails but we have cached results, use them
+            if cache_data["results"]:
+                print(f"Scraping failed, using cached results. Error: {str(e)}")
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to retrieve content: {str(e)}",
+                    "articles": [],
+                    "pagination": {
+                        "current_page": page,
+                        "per_page": per_page,
+                        "total_items": 0,
+                        "total_pages": 0
+                    }
+                }
+    
+    # Get the current set of results (either freshly scraped or from cache)
+    all_articles = last_scraped_results
+    
+    # Calculate pagination details
+    total_items = len(all_articles)
+    total_pages = max(1, (total_items + per_page - 1) // per_page)
+    
+    # Ensure page is within valid range
+    page = min(max(1, page), total_pages)
+    
+    # Calculate slice indices
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    
+    # Get the slice of articles for the requested page
+    paged_articles = all_articles[start_idx:end_idx]
+    
+    # Add cache age information
+    cache_age_minutes = None
+    if cache_data["time_since_scrape"]:
+        cache_age_minutes = round(cache_data["time_since_scrape"] / 60, 1)
+    
+    return {
+        "status": "success",
+        "articles": paged_articles,
+        "cache_info": {
+            "age_minutes": cache_age_minutes,
+            "fresh": need_scrape
+        },
+        "pagination": {
+            "current_page": page,
+            "per_page": per_page,
+            "total_items": total_items,
+            "total_pages": total_pages
+        }
+    }
+
+@app.get("/api/scrape")
+async def scrape_endpoint(background_tasks: BackgroundTasks):
+    """
+    Endpoint to scrape all sources and update the cache.
+    Returns immediately with status and runs scraping in background.
+    """
     try:
-        if source_index < 0 or source_index >= len(sources):
-            return {
-                "status": "error",
-                "message": f"Invalid source index. Must be between 0 and {len(sources)-1}"
-            }
+        # Run in background to avoid timeout for long-running scrapes
+        background_tasks.add_task(scrape_and_update_cache)
         
-        specific_source = sources[source_index]
-        results = scrape_news_with_selenium(specific_source)
-        background_tasks.add_task(save_to_db, results)
         return {
             "status": "success",
-            "source": specific_source["name"],
-            "articles_found": len(results),
-            "data": results
+            "message": "Scraping started in background. Use /api/content to get results.",
+            "current_cache_size": len(last_scraped_results)
         }
     except Exception as e:
         return {
@@ -405,6 +388,14 @@ async def scrape_specific_source(source_index: int, background_tasks: Background
             "message": str(e)
         }
 
+def scrape_and_update_cache():
+    """Background task to scrape and update the cache"""
+    try:
+        results = run_all_scrapers_selenium()
+        update_cache_with_results(results)
+        print(f"Background scrape completed successfully. Found {len(results)} articles.")
+    except Exception as e:
+        print(f"Background scrape failed: {str(e)}")
 @app.get("/health")
 def health_check():
     """Check the health status of the API"""
@@ -420,7 +411,7 @@ if __name__ == "__main__":
     print("=" * 80 + "\033[0m")
     
     print("\n\033[1mBefore running, make sure you have installed:\033[0m")
-    print("1. Python packages: pip install fastapi uvicorn selenium webdriver-manager mysql-connector-python")
+    print("1. Python packages: pip install fastapi uvicorn selenium webdriver-manager")
     print("2. Chrome browser must be installed on your system")
     print("\nAvailable endpoints:")
     print("- Main page: http://localhost:8000")
