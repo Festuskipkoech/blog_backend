@@ -11,22 +11,33 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
-import mysql.connector  # New import for MySQL
+from fastapi.middleware.cors import CORSMiddleware
+import mysql.connector  
+# New import for MySQL
 
 app = FastAPI(title="Irungu Kang'ata News Scraper with Selenium and MySQL")
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # ------------------------
 # MySQL Database Settings
 # ------------------------
 db_config = {
     "host": "localhost",
     "user": "root",      
-    "password": "",  
+    "password": "1234",  
     "database": "news_scraper"      
 }
 
 def init_db():
     """Initializes the database and creates the articles table if it doesn't exist."""
+    
+    conn= None
+    cursor=None
     try:
         # First, create the database if it doesn't exist
         conn = mysql.connector.connect(
@@ -66,6 +77,8 @@ init_db()
 
 def save_to_db(articles: List[Dict]):
     """Save scraped articles to MySQL database, ignoring duplicates."""
+    conn=None
+    cursor=None
     try:
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
@@ -299,6 +312,9 @@ def read_root():
 @app.get("/scrape")
 async def scrape_endpoint(background_tasks: BackgroundTasks):
     """Endpoint to scrape all sources and save the results to MySQL."""
+    
+    conn= None
+    cursor=None
     try:
         results = run_all_scrapers_selenium()
         # Save the scraped results in the background so the API responds immediately
@@ -320,6 +336,8 @@ async def get_content(
     per_page: int = Query(6, ge=1, le=100)
 ):
     """Get paginated content from the database."""
+    conn= None
+    cursor=None
     try:
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor(dictionary=True)
@@ -429,4 +447,4 @@ if __name__ == "__main__":
     print("- Scrape specific source: http://localhost:8000/scrape/{index}")
     print("- Health check: http://localhost:8000/health")
     
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

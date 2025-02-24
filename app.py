@@ -4,6 +4,7 @@ import time
 import random
 import re
 import hashlib
+import os
 from typing import List, Dict, Optional
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -14,13 +15,14 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
 import mysql.connector 
 from fastapi.middleware.cors import CORSMiddleware
-
+from selenium.webdriver.chrome.service import Service
+from datetime import datetime, timedelta
 
 app = FastAPI(title="Irungu Kang'ata News Scraper with Selenium and MySQL")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  
+    allow_origins=["https://blog/jengapps.org", "http://blog/jengapps.org"],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -32,12 +34,13 @@ app.add_middleware(
 db_config = {
     "host": "localhost",
     "user": "root", 
-    "password": "", 
+    "password": "1234", 
     "database": "news_scraper" 
 }
 
 def init_db():
     """Initializes the database and creates the articles table if it doesn't exist."""
+    
     try:
         # First, create the database if it doesn't exist
         conn = mysql.connector.connect(
@@ -81,8 +84,64 @@ def generate_content_hash(article: Dict) -> str:
     content_string = f"{article.get('title', '')}{article.get('content', '')}"
     return hashlib.sha256(content_string.encode()).hexdigest()
 
+def normalize_date(date_str):
+    """Convert various date formats to MySQL compatible format (YYYY-MM-DD)"""
+    try:
+        # Remove any extra whitespace
+        date_str = date_str.strip()
+        
+        # Common date patterns we might encounter
+        date_patterns = [
+            '%B %d, %Y',           # December 12, 2024
+            '%d %B %Y',            # 12 December 2024
+            '%Y-%m-%d',            # 2024-12-12
+            '%d-%m-%Y',            # 12-12-2024
+            '%d/%m/%Y',            # 12/12/2024
+            '%Y/%m/%d',            # 2024/12/12
+            '%b %d, %Y',           # Dec 12, 2024
+            '%d %b %Y',            # 12 Dec 2024
+            '%d.%m.%Y',            # 12.12.2024
+            '%Y.%m.%d',            # 2024.12.12
+        ]
+        
+        # Try each pattern until we find a match
+        for pattern in date_patterns:
+            try:
+                parsed_date = datetime.strptime(date_str, pattern)
+                return parsed_date.strftime('%Y-%m-%d')
+            except ValueError:
+                continue
+        
+        # If no pattern matches, handle special cases
+        if 'ago' in date_str.lower():
+            # Handle relative dates (e.g., "2 days ago")
+            now = datetime.now()
+            if 'day' in date_str.lower():
+                days = int(re.search(r'\d+', date_str).group())
+                date = now - timedelta(days=days)
+            elif 'hour' in date_str.lower():
+                date = now
+            elif 'week' in date_str.lower():
+                weeks = int(re.search(r'\d+', date_str).group())
+                date = now - timedelta(weeks=weeks)
+            elif 'month' in date_str.lower():
+                months = int(re.search(r'\d+', date_str).group())
+                date = now - timedelta(days=months*30)  # Approximate
+            else:
+                date = now
+            return date.strftime('%Y-%m-%d')
+            
+        # If we can't parse the date, return today's date
+        return datetime.now().strftime('%Y-%m-%d')
+        
+    except Exception as e:
+        print(f"Error parsing date '{date_str}': {str(e)}")
+        return datetime.now().strftime('%Y-%m-%d')
+
 def save_to_db(articles: List[Dict]):
-    """Save scraped articles to MySQL database with duplicate prevention."""
+    """Save scraped articles to MySQL database with improved date handling."""
+    conn = None
+    cursor = None
     try:
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor()
@@ -90,46 +149,56 @@ def save_to_db(articles: List[Dict]):
         duplicate_count = 0
         
         for article in articles:
-            # Generate a unique hash for this article
-            content_hash = generate_content_hash(article)
-            article['content_hash'] = content_hash
-            
-            # Check if this article already exists in the database
-            check_query = "SELECT id FROM articles WHERE content_hash = %s"
-            cursor.execute(check_query, (content_hash,))
-            exists = cursor.fetchone()
-            
-            if not exists:
-                # Insert new article
-                query = """
-                INSERT INTO articles (title, date, content, author, link, source, content_hash)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                """
-                values = (
-                    article.get("title"),
-                    article.get("date"),
-                    article.get("content"),
-                    article.get("author"),
-                    article.get("link"),
-                    article.get("source"),
-                    content_hash
-                )
-                cursor.execute(query, values)
-                conn.commit()
-                inserted_count += 1
-            else:
-                duplicate_count += 1
+            try:
+                # Normalize the date
+                normalized_date = normalize_date(article.get('date', ''))
+                
+                # Generate a unique hash for this article
+                content_hash = generate_content_hash(article)
+                article['content_hash'] = content_hash
+                
+                # Check if this article already exists in the database
+                check_query = "SELECT id FROM articles WHERE content_hash = %s"
+                cursor.execute(check_query, (content_hash,))
+                exists = cursor.fetchone()
+                
+                if not exists:
+                    # Insert new article with normalized date
+                    query = """
+                    INSERT INTO articles (title, date, content, author, link, source, content_hash)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """
+                    values = (
+                        article.get("title"),
+                        normalized_date,
+                        article.get("content"),
+                        article.get("author"),
+                        article.get("link"),
+                        article.get("source"),
+                        content_hash
+                    )
+                    cursor.execute(query, values)
+                    conn.commit()
+                    inserted_count += 1
+                else:
+                    duplicate_count += 1
+                    
+            except Exception as e:
+                print(f"Error saving article '{article.get('title', 'Unknown')}': {str(e)}")
+                continue
                 
         print(f"Inserted {inserted_count} new articles into the database.")
         print(f"Skipped {duplicate_count} duplicate articles.")
+        
     except Exception as e:
         print("Error saving to database:", e)
+        if conn:
+            conn.rollback()
     finally:
         if cursor:
             cursor.close()
         if conn:
             conn.close()
-
 # ------------------------
 # Scraper configuration
 # ------------------------
@@ -219,30 +288,55 @@ sources = [
 ]
 
 def get_webdriver():
-    """Set up and return a headless Chrome webdriver."""
+    """Set up and return a headless Chrome webdriver with version compatibility checks."""
     chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-infobars")
+    chrome_options.add_argument("--disable-notifications")
+    
+    # Random user agent
     user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/101.0.4951.54 Safari/537.36",
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 15_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Mobile/15E148 Safari/604.1"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
     ]
     chrome_options.add_argument(f"user-agent={random.choice(user_agents)}")
+    
     try:
-        return webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
+        # Set Chrome binary location
+        chrome_binary = "/usr/bin/google-chrome"
+        if not os.path.exists(chrome_binary):
+            raise Exception(f"Chrome binary not found at {chrome_binary}")
+        
+        chrome_options.binary_location = chrome_binary
+        
+        # Set up ChromeDriver service
+        service = Service(executable_path='/usr/local/bin/chromedriver')
+        
+        # Create and return the WebDriver instance
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        return driver
+        
     except Exception as e:
-        print(f"Error setting up WebDriver: {str(e)}")
-        print("Trying alternative setup method...")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-infobars")
-        return webdriver.Chrome(options=chrome_options)
-
+        print(f"Error creating WebDriver: {str(e)}")
+        
+        # Get Chrome version for error reporting
+        try:
+            import subprocess
+            chrome_version = subprocess.check_output([chrome_binary, '--version']).decode().strip()
+            print(f"Installed Chrome version: {chrome_version}")
+            
+            chromedriver_version = subprocess.check_output(['chromedriver', '--version']).decode().strip()
+            print(f"Installed ChromeDriver version: {chromedriver_version}")
+        except:
+            pass
+            
+        raise Exception(f"Failed to initialize WebDriver: {str(e)}")
 def clean_text(text):
     """Clean up text by removing extra whitespace."""
     if not text:
@@ -369,6 +463,9 @@ async def scrape_endpoint(
     background_tasks.add_task(background_scrape_and_save)
     
     # Immediately fetch content from the database
+    
+    conn= None
+    cursor=None
     try:
         conn = mysql.connector.connect(**db_config)
         cursor = conn.cursor(dictionary=True)

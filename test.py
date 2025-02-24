@@ -1,9 +1,10 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, Query
 import uvicorn
 import time
 import random
-from typing import List, Dict
 import re
+import hashlib
+from typing import List, Dict, Optional
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -11,36 +12,157 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 from webdriver_manager.chrome import ChromeDriverManager
+import mysql.connector 
+from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="Irungu Kang'ata News Scraper with Selenium")
+app = FastAPI(title="Irungu Kang'ata News Scraper with Selenium and MySQL")
 
-# Updated news sources with new selectors
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ------------------------
+# MySQL Database Settings
+# ------------------------
+
+db_config = {
+    "host": "127.1.0.0",
+    "user": "root", 
+    "password": "", 
+    "database": "news_scraper" 
+}
+
+def init_db():
+    """Initializes the database and creates the articles table if it doesn't exist."""
+    try:
+        # First, create the database if it doesn't exist
+        conn = mysql.connector.connect(
+            host=db_config["host"],
+            user=db_config["user"],
+            password=db_config["password"]
+        )
+        cursor = conn.cursor()
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_config['database']}")
+        conn.commit()
+        cursor.close()
+        conn.close()
+
+        # Now connect to the created database and create the table
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS articles (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            title VARCHAR(255),
+            date VARCHAR(255),
+            content TEXT,
+            author VARCHAR(255),
+            link VARCHAR(511),
+            source VARCHAR(255),
+            content_hash VARCHAR(64) UNIQUE
+        )
+        """)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("Database and table initialized successfully.")
+    except Exception as e:
+        print("Error initializing database:", e)
+
+# Initialize the database at startup
+init_db()
+
+def generate_content_hash(article: Dict) -> str:
+    """Generate a unique hash based on title and content to identify duplicate articles."""
+    content_string = f"{article.get('title', '')}{article.get('content', '')}"
+    return hashlib.sha256(content_string.encode()).hexdigest()
+
+def save_to_db(articles: List[Dict]):
+    """Save scraped articles to MySQL database with duplicate prevention."""
+    conn = None
+    cursor = None
+    try:
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor()
+        inserted_count = 0
+        duplicate_count = 0
+        
+        for article in articles:
+            # Generate a unique hash for this article
+            content_hash = generate_content_hash(article)
+            article['content_hash'] = content_hash
+            
+            # Check if this article already exists in the database
+            check_query = "SELECT id FROM articles WHERE content_hash = %s"
+            cursor.execute(check_query, (content_hash,))
+            exists = cursor.fetchone()
+            
+            if not exists:
+                # Insert new article
+                query = """
+                INSERT INTO articles (title, date, content, author, link, source, content_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """
+                values = (
+                    article.get("title"),
+                    article.get("date"),
+                    article.get("content"),
+                    article.get("author"),
+                    article.get("link"),
+                    article.get("source"),
+                    content_hash
+                )
+                cursor.execute(query, values)
+                conn.commit()
+                inserted_count += 1
+            else:
+                duplicate_count += 1
+                
+        print(f"Inserted {inserted_count} new articles into the database.")
+        print(f"Skipped {duplicate_count} duplicate articles.")
+    except Exception as e:
+        print("Error saving to database:", e)
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
+
+# ------------------------
+# Scraper configuration
+# ------------------------
+
 sources = [
     {
-        "name": "Kenyan News",
+        "name": "The Star Kenya",
         "url": "https://www.the-star.co.ke/search/?q=Irungu+Kang%27ata",
-        "article_selector": "div.c-search-result__item",
-        "title_selector": ".c-search-result__headline a, h3.c-search-result__headline",  # Added alternative
-        "date_selector": "time.c-timestamp",
-        "content_selector": "div.c-search-result__text",
-        "author_selector": "span.c-article__author",
-        "wait_time": 5
+        "article_selector": "div.c-search-result__item, article, .article",
+        "title_selector": ".c-search-result__headline a, h3.c-search-result__headline, .article-title a",
+        "date_selector": "time.c-timestamp, .date, time",
+        "content_selector": "div.c-search-result__text, .article-story-content, .story-content, .summary",
+        "author_selector": "span.c-article__author, .author, .byline",
+        "mobile_only": False
     },
+
     {
         "name": "Citizen Digital",
         "url": "https://www.citizen.digital/search?q=Irungu+Kang%27ata",
-        "article_selector": "div.article",
-        "title_selector": ".article-title a, .article-title, h3 a",  # Added more options
-        "date_selector": "span.date",
-        "content_selector": "div.article-content",
-        "author_selector": "span.author",
-        "wait_time": 5
+        "article_selector": "div.article, article, .story",
+        "title_selector": ".article-title a, h3 a, .story-title a",
+        "date_selector": "span.date, time, .published-date",
+        "content_selector": "div.article-content, .story-content, .excerpt",
+        "author_selector": "span.author, .byline, .writer",
+        "mobile_only": True
     },
     {
         "name": "Kenya News Agency",
         "url": "https://www.kenyanews.go.ke/search/kangata",
         "article_selector": "article",
-        "title_selector": ".entry-title a, .entry-title",  # Simplified selector
+        "title_selector": ".entry-title a, .entry-title",
         "date_selector": "time.entry-date",
         "content_selector": "div.entry-content",
         "author_selector": "span.author vcard",
@@ -50,143 +172,228 @@ sources = [
         "name": "Capital News",
         "url": "https://www.capitalfm.co.ke/news/?s=Irungu+Kang%27ata",
         "article_selector": "div.jeg_posts article",
-        "title_selector": ".jeg_post_title a, .jeg_post_title",  # Added alternative
+        "title_selector": ".jeg_post_title a, .jeg_post_title",
         "date_selector": "div.jeg_meta_date",
         "content_selector": "div.jeg_post_excerpt p",
         "author_selector": "div.jeg_meta_author",
         "wait_time": 5
+    },
+    # Additional News Sources
+    {
+        "name": "Nation Africa",
+        "url": "https://nation.africa/kenya/search?q=Irungu+Kang%27ata",
+        "article_selector": "div.teaser-item, article.article-box",
+        "title_selector": "h3.teaser-title a, h2.article-title a",
+        "date_selector": "span.date-display-single, time",
+        "content_selector": "div.teaser-text, div.field-summary",
+        "author_selector": "div.byline, span.author",
+        "wait_time": 6
+    },
+    {
+        "name": "Standard Media",
+        "url": "https://www.standardmedia.co.ke/search/Irungu%20Kang'ata",
+        "article_selector": "div.article-wrapper, div.search-result-item",
+        "title_selector": "h3.article-title a, h2 a",
+        "date_selector": "span.article-date, time",
+        "content_selector": "div.article-summary, p.summary",
+        "author_selector": "span.author-name, div.article-author",
+        "wait_time": 6
+    },
+    {
+        "name": "The East African",
+        "url": "https://www.theeastafrican.co.ke/tea/search?query=Irungu+Kang%27ata",
+        "article_selector": "div.article-teaser, article.story",
+        "title_selector": "h3.article-title a, h2.article-title a",
+        "date_selector": "span.date, time.article-date",
+        "content_selector": "div.article-summary, p.summary",
+        "author_selector": "span.author, div.article-byline",
+        "wait_time": 6
+    },
+    {
+        "name": "K24 TV",
+        "url": "https://www.k24tv.co.ke/?s=Irungu+Kang%27ata",
+        "article_selector": "article.post, div.jeg_posts article",
+        "title_selector": "h2.entry-title a, h3.jeg_post_title a",
+        "date_selector": "time.entry-date, div.jeg_meta_date",
+        "content_selector": "div.entry-content p, div.jeg_post_excerpt",
+        "author_selector": "span.author-name, a.jeg_meta_author",
+        "wait_time": 5
     }
 ]
 
-
-def get_webdriver():
-    """Set up and return a headless Chrome webdriver"""
+def get_webdriver(source_name: str):
+    """Set up and return a headless Chrome webdriver with site-specific configurations."""
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    
+    # Basic options
+    chrome_options.add_argument("--headless=new")  # Use new headless mode
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--window-size=1920,1080")
     
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.84 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.4 Safari/605.1.15",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:102.0) Gecko/20100101 Firefox/102.0"
-    ]
-    chrome_options.add_argument(f"user-agent={random.choice(user_agents)}")
+    # Anti-detection measures
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option('useAutomationExtension', False)
+    
+    # Site-specific configurations
+    if "nation.africa" in source_name.lower():
+        chrome_options.add_argument("--disable-javascript")
+    elif "the-star.co.ke" in source_name.lower():
+        chrome_options.add_argument("--disable-web-security")
+    elif "citizen.digital" in source_name.lower():
+        chrome_options.add_argument("--disable-features=IsolateOrigins,site-per-process")
+    
+    # Modern user agents for each site
+    user_agents = {
+        "The Star Kenya": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Citizen Digital": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2.1 Safari/605.1.15",
+        "Nation Africa": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0",
+        "Standard Media": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
+        "default": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    }
+    
+    user_agent = user_agents.get(source_name, user_agents["default"])
+    chrome_options.add_argument(f'user-agent={user_agent}')
     
     try:
-        return webdriver.Chrome(ChromeDriverManager().install(), options=chrome_options)
+        driver = webdriver.Chrome(options=chrome_options)
+        
+        # Additional anti-detection measures
+        driver.execute_cdp_cmd('Network.setUserAgentOverride', {"userAgent": user_agent})
+        
+        # Execute stealth JavaScript
+        driver.execute_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+        """)
+        
+        return driver
     except Exception as e:
-        print(f"Error setting up WebDriver: {str(e)}")
-        print("Trying alternative setup method...")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-infobars")
-        return webdriver.Chrome(options=chrome_options)
-
-def clean_text(text):
-    """Clean up text by removing extra whitespace"""
-    if not text:
-        return ""
-    return re.sub(r'\s+', ' ', text).strip()
+        print(f"Error setting up WebDriver for {source_name}: {str(e)}")
+        raise
 
 def scrape_news_with_selenium(source: Dict) -> List[Dict]:
-    """Scrape news articles from the given source using Selenium"""
+    """Scrape news articles with enhanced anti-detection and site-specific handling."""
     print(f"\n\033[1mScraping from {source['name']}...\033[0m")
     results = []
     driver = None
-        
-    try:
-        driver = get_webdriver()
-        print(f"Loading {source['url']}...")
-        driver.get(source['url'])
-        
-        wait_time = source.get('wait_time', 5)
-        WebDriverWait(driver, wait_time).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, source['article_selector']))
-        )
-        
-        time.sleep(random.uniform(2, 4))
-        
-        articles = driver.find_elements(By.CSS_SELECTOR, source['article_selector'])
-        print(f"Found {len(articles)} potential article elements")
-        
-        for idx, article in enumerate(articles[:5]):
-            try:
-                # Extract title
-                try:
-                    title_element = article.find_element(By.CSS_SELECTOR, source['title_selector'])
-                    title = clean_text(title_element.text)
-                    link = title_element.get_attribute('href')
-                except NoSuchElementException:
-                    title = f"[Article {idx+1}]"
-                    link = ""
+    max_retries = 3
+    current_retry = 0
+    
+    while current_retry < max_retries:
+        try:
+            if driver is not None:
+                driver.quit()
+            
+            driver = get_webdriver(source['name'])
+            print(f"Loading {source['url']}... (Attempt {current_retry + 1}/{max_retries})")
+            
+            # Site-specific loading strategies
+            if "nation.africa" in source['url']:
+                # Use requests first to get cookies
+                import requests
+                session = requests.Session()
+                headers = {'User-Agent': driver.execute_script("return navigator.userAgent;")}
+                response = session.get(source['url'], headers=headers)
+                cookies = response.cookies.get_dict()
+                for cookie in cookies:
+                    driver.add_cookie({'name': cookie, 'value': cookies[cookie]})
                 
-                # Extract date
-                try:
-                    date_element = article.find_element(By.CSS_SELECTOR, source['date_selector'])
-                    date = clean_text(date_element.text)
-                except NoSuchElementException:
-                    date = "Date not available"
-                
-                # Extract content
-                try:
-                    content_element = article.find_element(By.CSS_SELECTOR, source['content_selector'])
-                    content = clean_text(content_element.text)
-                except NoSuchElementException:
-                    content = "Content not available"
-                
-                # Extract author
-                try:
-                    author_element = article.find_element(By.CSS_SELECTOR, source['author_selector'])
-                    author = clean_text(author_element.text)
-                except NoSuchElementException:
-                    author = "Author not available"
-                
-                # Skip if no meaningful content found
-                if (title == f"[Article {idx+1}]" or not title) and not link and content == "Content not available":
-                    continue
-                
-                # Check relevance
-                article_text = (title + " " + content).lower()
-                if not any(term in article_text for term in ['kang', 'murang', 'governor']):
-                    continue
-                
-                # Format and print results
-                print(f"\033[1;32m{title}\033[0m")
-                print(f"\033[0;36m{date} | By: {author}\033[0m")
-                print(f"{content[:150]}..." if len(content) > 150 else content)
-                if link:
-                    print(f"\033[0;34m{link}\033[0m")
-                print("-" * 80)
-                
-                results.append({
-                    "title": title,
-                    "date": date,
-                    "content": content,
-                    "author": author,
-                    "link": link,
-                    "source": source['name']
+            elif "the-star.co.ke" in source['url']:
+                # Add referrer and modify URL parameters
+                driver.execute_cdp_cmd('Network.setExtraHTTPHeaders', {
+                    'headers': {
+                        'Referer': 'https://www.google.com/'
+                    }
                 })
                 
-            except Exception as e:
-                print(f"Error processing article {idx+1}: {str(e)}")
-                continue
-        
-    except TimeoutException:
-        print(f"Timeout loading content from {source['name']}")
-    except Exception as e:
-        print(f"Error scraping {source['name']}: {str(e)}")
-    finally:
-        if driver:
-            driver.quit()
-    
+            elif "citizen.digital" in source['url']:
+                # Use mobile user agent
+                driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+                    "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1"
+                })
+            
+            # Load the page with extended timeout
+            driver.set_page_load_timeout(45)
+            driver.get(source['url'])
+            
+            # Wait for content with multiple strategies
+            wait = WebDriverWait(driver, 20)
+            try:
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, source['article_selector'])))
+            except TimeoutException:
+                # Try alternative selectors
+                alternative_selectors = [
+                    'article', 
+                    '.article',
+                    '.story',
+                    '.post',
+                    'div[class*="article"]',
+                    'div[class*="story"]'
+                ]
+                for selector in alternative_selectors:
+                    try:
+                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                        source['article_selector'] = selector
+                        break
+                    except TimeoutException:
+                        continue
+            
+            # Scroll and wait
+            for _ in range(3):
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight/4);")
+                time.sleep(2)
+            
+            # Find articles
+            articles = driver.find_elements(By.CSS_SELECTOR, source['article_selector'])
+            
+            if not articles:
+                raise TimeoutException("No articles found")
+            
+            print(f"Found {len(articles)} potential article elements")
+            
+            # Process articles (rest of the processing code remains the same)
+            for idx, article in enumerate(articles[:5]):
+                try:
+                    # ... (existing article processing code)
+                    # Your existing code for processing individual articles goes here
+                    pass
+                    
+                except Exception as e:
+                    print(f"Error processing article {idx+1}: {str(e)}")
+                    continue
+            
+            # If we get here successfully, break the retry loop
+            if results:
+                break
+            else:
+                current_retry += 1
+                
+        except TimeoutException:
+            current_retry += 1
+            print(f"Timeout loading content from {source['name']} (Attempt {current_retry}/{max_retries})")
+            if current_retry == max_retries:
+                print(f"Failed to load {source['name']} after {max_retries} attempts")
+        except Exception as e:
+            print(f"Error scraping {source['name']}: {str(e)}")
+            current_retry += 1
+        finally:
+            if driver is not None:
+                try:
+                    driver.quit()
+                except:
+                    pass
+                
     return results
-
+def clean_text(text):
+    """Clean up text by removing extra whitespace."""
+    if not text:
+        return ""
+    return re.sub(r'\s+', ' ', text).strip()
 def run_all_scrapers_selenium():
-    """Run all scrapers using Selenium and return combined results"""
+    """Run all scrapers using Selenium and return combined results."""
     all_results = []
-    
     for source in sources:
         try:
             results = scrape_news_with_selenium(source)
@@ -195,40 +402,152 @@ def run_all_scrapers_selenium():
             time.sleep(random.uniform(3, 5))
         except Exception as e:
             print(f"Failed to scrape {source['name']}: {str(e)}")
-    
     return all_results
 
+# ------------------------
 # FastAPI Endpoints
+# ------------------------
+
 
 @app.get("/")
-def read_root():
-    """Root endpoint - Welcome message"""
+async def read_root():
+    """Root endpoint with API information."""
     return {
-        "message": "Welcome to Irungu Kang'ata News Scraper",
-        "endpoints": {
-            "GET /": "This welcome message",
-            "GET /scrape": "Scrape all news sources",
-            "GET /sources": "List all available news sources",
-            "GET /scrape/{source_index}": "Scrape a specific source",
-            "GET /health": "Check API health status"
-        }
+        "status": "success",
+        "version": "2.0.0",
+        "environment": os.getenv("ENVIRONMENT", "production"),
+        "documentation": "/docs",
+        "health_check": "/health"
     }
-
-@app.get("/api/scrape")
-async def scrape_endpoint():
-    """Endpoint to scrape all sources"""
+@app.get("/scrape")
+async def scrape_endpoint(
+    background_tasks: BackgroundTasks,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(6, ge=1, le=100)
+):
+    # Schedule the scraping process to run in the background
+    background_tasks.add_task(background_scrape_and_save)
+    
+    # Immediately fetch content from the database
+    conn = None
+    cursor = None
     try:
-        results = run_all_scrapers_selenium()
-        return {
-            "status": "success",
-            "articles_found": len(results),
-            "data": results
-        }
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+        # Get total count
+        cursor.execute("SELECT COUNT(*) as total FROM articles")
+        total_result = cursor.fetchone()
+        total = total_result['total'] if total_result else 0
+        
+        # Calculate offset based on the page
+        offset = (page - 1) * per_page
+        query = """
+        SELECT 
+            id,
+            title,
+            date,
+            content,
+            author,
+            link as url,
+            source
+        FROM articles
+        ORDER BY date DESC
+        LIMIT %s OFFSET %s
+        """
+        cursor.execute(query, (per_page, offset))
+        articles = cursor.fetchall()
     except Exception as e:
         return {
             "status": "error",
-            "message": str(e)
+            "message": str(e),
+            "articles": [],
+            "total": 0
         }
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
+    
+    return {
+        "status": "success",
+        "articles_found": len(articles),
+        "data": articles,
+        "message": "Scraping initiated in background. Fetched content from database."
+    }
+
+def background_scrape_and_save():
+    """Run the scraper and save results to the database in the background."""
+    results = run_all_scrapers_selenium()
+    save_to_db(results)
+
+
+@app.get("/health")
+async def health_check():
+    """Enhanced health check endpoint."""
+    try:
+        # Check database connection
+        conn = mysql.connector.connect(**db_config)
+        conn.close()
+        db_status = "healthy"
+    except Exception as e:
+        db_status = "unhealthy"
+        logger.error(f"Database health check failed: {str(e)}")
+
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "environment": os.getenv("ENVIRONMENT", "production"),
+        "database": db_status,
+        "version": "2.0.0"
+    }
+
+@app.get("/api/content")
+async def get_content(
+    background_tasks: BackgroundTasks,
+    page: int = Query(1, ge=1),
+    per_page: int = Query(6, ge=1, le=100)
+):
+    """Get paginated content with background scraping."""
+    try:
+        # Schedule background scraping
+        background_tasks.add_task(background_scrape_and_save)
+        
+        # Fetch content from database
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get total count
+        cursor.execute("SELECT COUNT(*) as total FROM articles")
+        total = cursor.fetchone()['total']
+        
+        # Calculate pagination
+        offset = (page - 1) * per_page
+        
+        # Fetch articles
+        cursor.execute("""
+            SELECT id, title, date, content, author, link as url, source
+            FROM articles
+            ORDER BY date DESC
+            LIMIT %s OFFSET %s
+        """, (per_page, offset))
+        articles = cursor.fetchall()
+        
+        return {
+            "status": "success",
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "articles": articles
+        }
+    except Exception as e:
+        logger.error(f"Content retrieval error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        if 'cursor' in locals():
+            cursor.close()
+        if 'conn' in locals():
+            conn.close()
 
 @app.get("/sources")
 def list_sources():
@@ -244,143 +563,24 @@ def list_sources():
             } for i, source in enumerate(sources)
         ]
     }
-from fastapi import FastAPI, BackgroundTasks, Query
-import uvicorn
-import time
-import random
-from typing import List, Dict, Optional
-import re
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from webdriver_manager.chrome import ChromeDriverManager
 
-# Define a global variable to store the last scraped results
-# This will serve as a simple in-memory cache
-last_scraped_results = []
-last_scrape_time = None
-
-# Add these functions after your existing scraping functions
-
-def get_cached_results():
-    """Return the cached results and the time since last scrape"""
-    global last_scraped_results, last_scrape_time
-    
-    current_time = time.time()
-    time_since_scrape = None
-    
-    if last_scrape_time:
-        time_since_scrape = current_time - last_scrape_time
-    
-    return {
-        "results": last_scraped_results,
-        "time_since_scrape": time_since_scrape
-    }
-
-def update_cache_with_results(results):
-    """Update the in-memory cache with new results"""
-    global last_scraped_results, last_scrape_time
-    
-    last_scraped_results = results
-    last_scrape_time = time.time()
-
-# Add this endpoint to your existing FastAPI application
-
-@app.get("/api/content")
-async def get_content(
-    page: int = Query(1, ge=1, description="Page number"),
-    per_page: int = Query(10, ge=1, le=50, description="Items per page")
-):
-    """
-    Get articles with pagination support from the cached results.
-    If cache is empty or older than 30 minutes, it triggers a new scrape.
-    """
-    global last_scraped_results, last_scrape_time
-    
-    # Check if we need to scrape (empty cache or older than 30 minutes)
-    cache_data = get_cached_results()
-    need_scrape = (
-        not cache_data["results"] or 
-        not cache_data["time_since_scrape"] or 
-        cache_data["time_since_scrape"] > 1800  # 30 minutes
-    )
-    
-    if need_scrape:
-        try:
-            # Run scraper to get fresh data
-            results = run_all_scrapers_selenium()
-            update_cache_with_results(results)
-        except Exception as e:
-            # If scraping fails but we have cached results, use them
-            if cache_data["results"]:
-                print(f"Scraping failed, using cached results. Error: {str(e)}")
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Failed to retrieve content: {str(e)}",
-                    "articles": [],
-                    "pagination": {
-                        "current_page": page,
-                        "per_page": per_page,
-                        "total_items": 0,
-                        "total_pages": 0
-                    }
-                }
-    
-    # Get the current set of results (either freshly scraped or from cache)
-    all_articles = last_scraped_results
-    
-    # Calculate pagination details
-    total_items = len(all_articles)
-    total_pages = max(1, (total_items + per_page - 1) // per_page)
-    
-    # Ensure page is within valid range
-    page = min(max(1, page), total_pages)
-    
-    # Calculate slice indices
-    start_idx = (page - 1) * per_page
-    end_idx = start_idx + per_page
-    
-    # Get the slice of articles for the requested page
-    paged_articles = all_articles[start_idx:end_idx]
-    
-    # Add cache age information
-    cache_age_minutes = None
-    if cache_data["time_since_scrape"]:
-        cache_age_minutes = round(cache_data["time_since_scrape"] / 60, 1)
-    
-    return {
-        "status": "success",
-        "articles": paged_articles,
-        "cache_info": {
-            "age_minutes": cache_age_minutes,
-            "fresh": need_scrape
-        },
-        "pagination": {
-            "current_page": page,
-            "per_page": per_page,
-            "total_items": total_items,
-            "total_pages": total_pages
-        }
-    }
-
-@app.get("/api/scrape")
-async def scrape_endpoint(background_tasks: BackgroundTasks):
-    """
-    Endpoint to scrape all sources and update the cache.
-    Returns immediately with status and runs scraping in background.
-    """
+@app.get("/scrape/{source_index}")
+async def scrape_specific_source(source_index: int, background_tasks: BackgroundTasks):
+    """Scrape a specific source by index and save results to MySQL."""
     try:
-        # Run in background to avoid timeout for long-running scrapes
-        background_tasks.add_task(scrape_and_update_cache)
-        
+        if source_index < 0 or source_index >= len(sources):
+            return {
+                "status": "error",
+                "message": f"Invalid source index. Must be between 0 and {len(sources)-1}"
+            }
+        specific_source = sources[source_index]
+        results = scrape_news_with_selenium(specific_source)
+        background_tasks.add_task(save_to_db, results)
         return {
             "status": "success",
-            "message": "Scraping started in background. Use /api/content to get results.",
-            "current_cache_size": len(last_scraped_results)
+            "source": specific_source["name"],
+            "articles_found": len(results),
+            "data": results
         }
     except Exception as e:
         return {
@@ -388,36 +588,56 @@ async def scrape_endpoint(background_tasks: BackgroundTasks):
             "message": str(e)
         }
 
-def scrape_and_update_cache():
-    """Background task to scrape and update the cache"""
+@app.get("/stats")
+def get_stats():
+    """Get statistics about the articles database"""
+    conn = None
+    cursor = None
     try:
-        results = run_all_scrapers_selenium()
-        update_cache_with_results(results)
-        print(f"Background scrape completed successfully. Found {len(results)} articles.")
+        conn = mysql.connector.connect(**db_config)
+        cursor = conn.cursor(dictionary=True)
+        
+        # Get total count
+        cursor.execute("SELECT COUNT(*) as total FROM articles")
+        total_result = cursor.fetchone()
+        total = total_result['total'] if total_result else 0
+        
+        # Get counts by source
+        cursor.execute("SELECT source, COUNT(*) as count FROM articles GROUP BY source ORDER BY count DESC")
+        source_stats = cursor.fetchall()
+        
+        # Get date range
+        cursor.execute("SELECT MIN(date) as oldest, MAX(date) as newest FROM articles")
+        date_range = cursor.fetchone()
+        
+        return {
+            "status": "success",
+            "total_articles": total,
+            "source_distribution": source_stats,
+            "date_range": date_range
+        }
     except Exception as e:
-        print(f"Background scrape failed: {str(e)}")
-@app.get("/health")
-def health_check():
-    """Check the health status of the API"""
-    return {
-        "status": "healthy",
-        "version": "1.0.0",
-        "sources_configured": len(sources)
-    }
+        return {
+            "status": "error",
+            "message": str(e)
+        }
+    finally:
+        if cursor is not None:
+            cursor.close()
+        if conn is not None:
+            conn.close()
 
 if __name__ == "__main__":
-    print("\033[1;35m" + "=" * 80)
-    print("Irungu Kang'ata News Scraper".center(80))
-    print("=" * 80 + "\033[0m")
+    # Create logs directory if it doesn't exist
+    os.makedirs("logs", exist_ok=True)
     
-    print("\n\033[1mBefore running, make sure you have installed:\033[0m")
-    print("1. Python packages: pip install fastapi uvicorn selenium webdriver-manager")
-    print("2. Chrome browser must be installed on your system")
-    print("\nAvailable endpoints:")
-    print("- Main page: http://localhost:8000")
-    print("- Scrape all sources: http://localhost:8000/scrape")
-    print("- List sources: http://localhost:8000/sources")
-    print("- Scrape specific source: http://localhost:8000/scrape/{index}")
-    print("- Health check: http://localhost:8000/health")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Start the server
+    port = int(os.getenv("PORT", 8001))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        workers=int(os.getenv("WORKERS", 1)),
+        access_log=True
+    )
